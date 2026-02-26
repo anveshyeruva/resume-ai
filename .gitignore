@@ -1,4 +1,24 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
-data/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Local data outputs (keep repo clean)
+data/*.json
+data/*.docx
+data/*.pdf
+data/*.txt
+
+# Env files
+.env
+!.env.example

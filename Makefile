@@ -1,2 +1,2 @@
 run:
-	PYTHONPATH=. streamlit run app/app.py
+	PYTHONPATH=. streamlit run app.py
