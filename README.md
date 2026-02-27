@@ -1,32 +1,33 @@
-# Resume AI (Local-First)
+# Resume AI Builder (Streamlit, Local-first)
 
-A local-first Streamlit app that helps you tailor your resume to a job description by:
-- Parsing responsibilities and requirements from the JD
-- Building a requirements scorecard (must-have vs nice-to-have)
-- Highlighting gaps and top keywords
-- Exporting a DOCX scorecard for quick review and sharing
-
-> AI rewriting is optional and can be added later (e.g., Ollama). The core workflow runs fully locally.
+A local-first Streamlit app that analyzes a Job Description against a base resume, builds a requirements scorecard + gap analysis, computes a match percentage, and exports a tailored DOCX. Optional AI rewriting supports **Local (Ollama)** and **Cloud (OpenAI)**.
 
 ---
 
-## Features
+## What you get
 
-- **JD parser:** Extracts responsibilities, must-haves, and nice-to-haves from job descriptions
-- **Requirements scorecard:** Grouped chips and match coverage summary
-- **Gap analysis:** Missing keywords and requirements surfaced clearly
-- **Sponsorship signals:** Detects explicit authorization language and contracting constraints (W2 vs C2C)
-- **DOCX export:** Generates a downloadable scorecard document
-- **Local-first:** No cloud dependency required for the baseline flow
-
----
-
-## Tech Stack
-
-- Python
-- Streamlit
-- python-docx (DOCX export)
+- JD parsing (responsibilities + keywords)
+- Requirements scorecard (Must-have and Nice-to-have)
+- Gap analysis (present vs missing, with confidence buckets)
+- **Match %** (weighted)
+- Tailoring suggestions
+- DOCX export (with caching)
+- AI modes: Off, Local, Cloud
 
 ---
 
-## Project Structure
+## Requirements
+
+- Python **3.10+** (recommended 3.11+)
+- macOS, Linux, or Windows
+- (Optional) Ollama for local AI
+- (Optional) OpenAI API key for cloud AI
+
+---
+
+## Setup (macOS / Linux)
+
+### 1) Create and activate a virtual environment
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
