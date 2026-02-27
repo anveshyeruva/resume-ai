@@ -22,3 +22,22 @@ data/*.txt
 # Env files
 .env
 !.env.example
+
+# macOS
+.DS_Store
+__MACOSX/
+
+# Python
+__pycache__/
+*.pyc
+
+# Virtualenv
+.venv/
+venv/
+
+# Streamlit
+.streamlit/
+
+# Local outputs
+data/run_*.json
+data/*.docx
