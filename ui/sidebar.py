@@ -1,4 +1,3 @@
-
 import streamlit as st
 
 AI_MODE_OFF = "off"
@@ -27,28 +26,36 @@ def render_sidebar() -> None:
         st.subheader("AI")
 
         modes = [AI_MODE_OFF, AI_MODE_LOCAL, AI_MODE_CLOUD]
-        st.session_state["ai_mode"] = st.selectbox(
+        st.selectbox(
             "AI mode",
             modes,
             index=modes.index(st.session_state["ai_mode"]),
+            key="ai_mode",
             help="Off uses deterministic parsing only. Local uses Ollama. Cloud uses a hosted provider.",
         )
 
         if st.session_state["ai_mode"] == AI_MODE_LOCAL:
             st.caption("Local LLM via Ollama (works with SSH tunnel too).")
-            st.session_state["ollama_base_url"] = st.text_input(
+            st.text_input(
                 "Ollama URL",
-                st.session_state["ollama_base_url"],
+                value=st.session_state["ollama_base_url"],
+                key="ollama_base_url",
                 help="Example: http://localhost:11434",
             )
-            st.session_state["ollama_model"] = st.text_input(
+            st.text_input(
                 "Model",
-                st.session_state["ollama_model"],
+                value=st.session_state["ollama_model"],
+                key="ollama_model",
                 help="Example: llama3.1:8b",
             )
 
         if st.session_state["ai_mode"] == AI_MODE_CLOUD:
             st.warning("Cloud AI sends JD and resume text to the provider and may incur charges.")
-            st.session_state["cloud_provider"] = st.selectbox("Provider", ["openai"])
-            st.session_state["openai_model"] = st.text_input("Model", st.session_state["openai_model"])
-            st.session_state["openai_api_key"] = st.text_input("API Key", type="password")
+            st.selectbox("Provider", ["openai"], key="cloud_provider")
+            st.text_input("Model", value=st.session_state["openai_model"], key="openai_model")
+            st.text_input(
+                "API Key",
+                value=st.session_state["openai_api_key"],
+                key="openai_api_key",
+                type="password",
+            )
