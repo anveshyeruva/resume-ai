@@ -48,6 +48,7 @@ render_header()
 # Session init
 # -----------------------
 st.session_state.setdefault("analysis", None)
+st.session_state.setdefault("analysis_jd_used", "")
 
 # JD inputs
 st.session_state.setdefault("jd_url", "")
@@ -55,6 +56,7 @@ st.session_state.setdefault("jd_text", "")
 st.session_state.setdefault("jd_source", "text")      # "text" or "paste"
 st.session_state.setdefault("jd_paste_raw", "")
 st.session_state.setdefault("jd_text_next", None)     # staged update before widget
+st.session_state.setdefault("fetch_error", None)
 
 # Resume inputs
 st.session_state.setdefault("base_resume", "")
@@ -86,7 +88,6 @@ def _is_probably_linkedin(url: str) -> bool:
 
 def _looks_like_login_wall(text: str) -> bool:
     t = (text or "").lower()
-    # generic + linkedin-ish authwall phrases
     needles = [
         "sign in",
         "log in",
@@ -134,6 +135,119 @@ def clean_jd_text(t: str) -> str:
     return t
 
 
+def sanitize_jd_text(t: str) -> str:
+    """Light cleanup to reduce boilerplate that inflates match scores."""
+    t = clean_jd_text(t)
+    if not t:
+        return ""
+
+    drop_substrings = [
+        "equal opportunity",
+        "eeo",
+        "e-verify",
+        "reasonable accommodation",
+        "background check",
+        "drug test",
+        "applicants must be",
+        "we do not discriminate",
+        "affirmative action",
+        "benefits",
+        "pay range",
+        "salary range",
+        "compensation",
+        "total rewards",
+        "privacy policy",
+        "cookie",
+        "terms of use",
+    ]
+
+    out_lines: list[str] = []
+    for raw in t.splitlines():
+        ln = raw.strip()
+        if not ln:
+            out_lines.append("")
+            continue
+        low = ln.lower()
+        if any(s in low for s in drop_substrings):
+            continue
+        # remove super long navigation-like lines
+        if len(ln) > 400:
+            continue
+        out_lines.append(ln)
+
+    cleaned = "\n".join(out_lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    # keep it bounded so huge pages don't dominate parsing
+    if len(cleaned) > 12000:
+        cleaned = cleaned[:12000]
+    return cleaned
+
+
+def _count_terms(text: str, terms: list[str]) -> int:
+    t = (text or "").lower()
+    score = 0
+    for term in terms:
+        if term in t:
+            score += 1
+    return score
+
+
+def compute_role_mismatch_factor(jd_text: str, resume_text: str) -> tuple[float, str | None]:
+    """Return (factor, message). factor < 1.0 means penalize likely role mismatch."""
+    jd = (jd_text or "")
+    res = (resume_text or "")
+
+    dotnet_terms = [
+        "c#",
+        ".net",
+        "asp.net",
+        "entity framework",
+        "ef core",
+        "linq",
+        "nuget",
+        "visual studio",
+        "blazor",
+        "wpf",
+        "winforms",
+        "mvc",
+    ]
+    devops_terms = [
+        "devops",
+        "sre",
+        "terraform",
+        "kubernetes",
+        "docker",
+        "ci/cd",
+        "cicd",
+        "jenkins",
+        "github actions",
+        "gitlab",
+        "azure devops",
+        "helm",
+        "prometheus",
+        "grafana",
+        "cloudwatch",
+        "ansible",
+        "infrastructure as code",
+        "iac",
+        "eks",
+        "aks",
+    ]
+
+    jd_dotnet = _count_terms(jd, dotnet_terms)
+    res_dotnet = _count_terms(res, dotnet_terms)
+    res_devops = _count_terms(res, devops_terms)
+
+    # Strong signal: JD is clearly .NET developer, resume is clearly DevOps, and resume lacks .NET.
+    if jd_dotnet >= 3 and res_devops >= 4 and res_dotnet <= 1:
+        return (
+            0.55,
+            "Detected a likely role mismatch (JD looks like .NET developer, resume looks like DevOps). Applying a match penalty.",
+        )
+
+    return (1.0, None)
+
+
 def _stage_set_jd_text(new_text: str) -> None:
     # Stage update; it will be applied BEFORE jd_text widget is created.
     st.session_state["jd_text_next"] = new_text
@@ -150,7 +264,6 @@ def on_fetch_url_clicked() -> None:
     try:
         text = fetch_job_text_from_url(url)
         if not text or len(text) < 300:
-            # Too short to be a JD; likely blocked or bad parse
             if _is_probably_linkedin(url):
                 st.session_state["jd_source"] = "paste"
                 st.session_state["fetch_error"] = (
@@ -162,7 +275,6 @@ def on_fetch_url_clicked() -> None:
                 )
             return
 
-        # If it smells like a login wall, route to paste mode
         if _looks_like_login_wall(text):
             st.session_state["jd_source"] = "paste"
             st.session_state["fetch_error"] = (
@@ -170,7 +282,6 @@ def on_fetch_url_clicked() -> None:
             )
             return
 
-        # Good: apply to JD box
         st.session_state["fetch_error"] = None
         _stage_set_jd_text(text)
 
@@ -275,6 +386,78 @@ def _scroll_list_html(items: list[str], max_height_px: int = 360) -> str:
 </div>
 """
     return body
+
+
+def _fallback_responsibilities_from_jd(jd_text: str, limit: int = 25) -> list[str]:
+    """
+    Best-effort fallback when parser does not extract responsibilities.
+    Pulls bullet-like lines from the JD text.
+    """
+    if not jd_text:
+        return []
+
+    items: list[str] = []
+    for raw in jd_text.splitlines():
+        ln = (raw or "").strip()
+        if not ln:
+            continue
+
+        # Common bullet / numbering patterns
+        if re.match(r"^[-•*]\s+\S", ln) or re.match(r"^\d+[.)]\s+\S", ln):
+            ln = re.sub(r"^[-•*]\s+", "", ln)
+            ln = re.sub(r"^\d+[.)]\s+", "", ln)
+
+        # Keep only reasonably sentence-like lines
+        if len(ln) < 18 or len(ln) > 240:
+            continue
+        if _is_noise(ln):
+            continue
+
+        # Avoid grabbing section headers
+        lower = ln.lower()
+        if lower in {"responsibilities", "requirements", "qualifications", "what you'll do", "what you will do"}:
+            continue
+        if lower.endswith(":") and len(lower) < 40:
+            continue
+
+        items.append(ln)
+
+    # De-dupe while preserving order
+    seen = set()
+    out = []
+    for x in items:
+        k = x.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(x)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _get_responsibilities(analysis: dict, jd_text: str) -> list[str]:
+    """
+    Tries multiple known locations for responsibilities; falls back to bullet extraction.
+    """
+    for path in [
+        ("responsibilities",),
+        ("scorecard", "responsibilities"),
+        ("req", "responsibilities"),
+        ("requirements", "responsibilities"),
+    ]:
+        cur = analysis
+        ok = True
+        for key in path:
+            if isinstance(cur, dict) and key in cur:
+                cur = cur[key]
+            else:
+                ok = False
+                break
+        if ok and isinstance(cur, list) and cur:
+            return [str(x).strip() for x in cur if str(x).strip()]
+
+    return _fallback_responsibilities_from_jd(jd_text)
 
 
 # -----------------------
@@ -388,6 +571,7 @@ if clear_resume_clicked:
 
 if reset_clicked:
     st.session_state["analysis"] = None
+    st.session_state["analysis_jd_used"] = ""
 
     st.session_state["jd_url"] = ""
     st.session_state["jd_text"] = ""
@@ -412,16 +596,20 @@ if reset_clicked:
 # Analyze
 # -----------------------
 if analyze_clicked:
-    jd_text = st.session_state.get("jd_text", "")
+    jd_text_raw = st.session_state.get("jd_text", "")
+    jd_text_used = sanitize_jd_text(jd_text_raw)
     base_resume = st.session_state.get("base_resume", "")
 
-    if not jd_text.strip():
+    # Store what we actually analyzed (for responsibilities fallback + transparency)
+    st.session_state["analysis_jd_used"] = jd_text_used
+
+    if not jd_text_used.strip():
         st.error("Add a Job Description first (fetch from URL or paste).")
     elif not base_resume.strip():
         st.error("Upload a resume (DOCX or PDF) or paste your base resume text first.")
     else:
         try:
-            analysis = run_analysis(jd_text, base_resume)
+            analysis = run_analysis(jd_text_used, base_resume)
             st.session_state["analysis"] = analysis
 
             # reset export cache
@@ -429,7 +617,7 @@ if analyze_clicked:
             st.session_state["docx_sig"] = None
 
             # run id (inputs + ai settings)
-            run_id = _make_run_id(jd_text, base_resume)
+            run_id = _make_run_id(jd_text_used, base_resume)
             if run_id != st.session_state.get("analysis_run_id"):
                 st.session_state["analysis_run_id"] = run_id
                 st.session_state["ai_rewritten_resp"] = None
@@ -441,9 +629,7 @@ if analyze_clicked:
                     st.session_state["ai_error"] = "Cloud mode selected but API key is missing."
                 else:
                     if st.session_state.get("ai_rewritten_resp") is None and st.session_state.get("ai_error") is None:
-                        base_bullets = analysis.get("responsibilities") or analysis["scorecard"].get(
-                            "responsibilities", []
-                        )
+                        base_bullets = _get_responsibilities(analysis, jd_text_used)
                         ai_out = rewrite_responsibilities(
                             base_bullets,
                             jd_keywords=analysis.get("keywords_top", []),
@@ -481,38 +667,49 @@ if CONFIG.ff_show_export and export_main_clicked:
 # -----------------------
 # Metrics (weighted)
 # -----------------------
-must_missing_high = analysis["gaps"]["must_missing_high"]
-must_missing_maybe = analysis["gaps"]["must_missing_maybe"]
-nice_missing_high = analysis["gaps"]["nice_missing_high"]
-nice_missing_maybe = analysis["gaps"]["nice_missing_maybe"]
+# -----------------------
+# Metrics (ATS-like, from gap_analysis if available)
+# -----------------------
+gaps = analysis["gaps"]
 
-must_present = len(analysis["gaps"]["must_present"])
-nice_present = len(analysis["gaps"]["nice_present"])
+match = gaps.get("match") if isinstance(gaps, dict) else None
+if match and "overall_pct" in match:
+    must_pct = float(match.get("must_pct", 0.0))
+    nice_pct = float(match.get("nice_pct", 0.0))
+    overall_pct = float(match.get("overall_pct", 0.0))
+    cap_reason = match.get("cap_reason")
+else:
+    # Fallback: if match block not present (older runs), keep old behavior
+    cap_reason = None
 
-must_missing_score = len(must_missing_high) + 0.5 * len(must_missing_maybe)
-nice_missing_score = len(nice_missing_high) + 0.5 * len(nice_missing_maybe)
+    must_missing_high = gaps["must_missing_high"]
+    must_missing_maybe = gaps["must_missing_maybe"]
+    nice_missing_high = gaps["nice_missing_high"]
+    nice_missing_maybe = gaps["nice_missing_maybe"]
 
-must_total = must_present + must_missing_score
-nice_total = nice_present + nice_missing_score
+    must_present = len(gaps["must_present"])
+    nice_present = len(gaps["nice_present"])
 
-must_pct = (must_present / must_total) if must_total else 0.0
-nice_pct = (nice_present / nice_total) if nice_total else 0.0
-overall_pct = (0.70 * must_pct) + (0.30 * nice_pct)
+    must_missing_score = len(must_missing_high) + 0.5 * len(must_missing_maybe)
+    nice_missing_score = len(nice_missing_high) + 0.5 * len(nice_missing_maybe)
 
-must_missing_count = len(must_missing_high) + len(must_missing_maybe)
-nice_missing_count = len(nice_missing_high) + len(nice_missing_maybe)
+    must_total = must_present + must_missing_score
+    nice_total = nice_present + nice_missing_score
 
-m0, m1, m2, m3, m4 = st.columns([1.2, 1, 1, 1, 1])
-m0.metric("Match %", f"{overall_pct * 100:.0f}%")
-m1.metric("Must-have present", must_present)
-m2.metric("Must-have missing", must_missing_count)
-m3.metric("Nice-to-have present", nice_present)
-m4.metric("Nice-to-have missing", nice_missing_count)
+    must_pct = (must_present / must_total) if must_total else 0.0
+    nice_pct = (nice_present / nice_total) if nice_total else 0.0
+    overall_pct = (0.70 * must_pct) + (0.30 * nice_pct)
 
-st.caption(
-    f"Must-have match: {must_pct * 100:.0f}%  |  Nice-to-have match: {nice_pct * 100:.0f}%  |  Overall: {overall_pct * 100:.0f}%"
-)
-st.progress(overall_pct)
+# Display
+m0, m1, m2 = st.columns([1.2, 1, 1])
+m0.metric("Match %", f"{overall_pct * 100:.1f}%")
+m1.metric("Must-have match", f"{must_pct * 100:.1f}%")
+m2.metric("Nice-to-have match", f"{nice_pct * 100:.1f}%")
+
+st.progress(max(0.0, min(1.0, overall_pct)))
+
+if cap_reason:
+    st.caption(f"Score note: {cap_reason}")
 
 # -----------------------
 # Sponsorship badge (simple)
@@ -557,22 +754,31 @@ tab_map = {name: tabs[i] for i, name in enumerate(tab_names)}
 # -----------------------
 with tab_map["Overview"]:
     st.subheader("Overview")
-    left, right = st.columns([1, 1])
 
-    with left:
-        resp = (analysis.get("responsibilities") or analysis["scorecard"].get("responsibilities", []))
-        resp = [r for r in resp if not _is_noise(r)]
+    # Top Keywords first
+    render_card("Top Keywords", render_chips(analysis.get("keywords_top", [])))
+
+    # Responsibilities next (with fallback when parser returns none)
+    resp = _get_responsibilities(
+        analysis,
+        st.session_state.get("analysis_jd_used", st.session_state.get("jd_text", "")),
+    )
+    resp = [r for r in resp if not _is_noise(r)]
+    if resp:
         render_card("Responsibilities (from JD)", _scroll_list_html(resp, max_height_px=360))
+    else:
+        render_card(
+            "Responsibilities (from JD)",
+            "<i>No responsibilities extracted.</i><br/>Try using <b>Paste JD instead</b> and paste only the description text.",
+        )
 
-        if st.session_state.get("ai_mode", "off") != "off":
-            if st.session_state.get("ai_error"):
-                render_card("AI Rewrite (Responsibilities)", f"<b>Skipped:</b> {st.session_state['ai_error']}")
-            elif st.session_state.get("ai_rewritten_resp"):
-                ai_resp = st.session_state["ai_rewritten_resp"]
-                render_card("AI Rewrite (Responsibilities)", _scroll_list_html(ai_resp, max_height_px=360))
-
-    with right:
-        render_card("Top Keywords", render_chips(analysis["keywords_top"]))
+    # AI rewrite (optional)
+    if st.session_state.get("ai_mode", "off") != "off":
+        if st.session_state.get("ai_error"):
+            render_card("AI Rewrite (Responsibilities)", f"<b>Skipped:</b> {st.session_state['ai_error']}")
+        elif st.session_state.get("ai_rewritten_resp"):
+            ai_resp = st.session_state["ai_rewritten_resp"]
+            render_card("AI Rewrite (Responsibilities)", _scroll_list_html(ai_resp, max_height_px=360))
 
     if CONFIG.ff_show_sponsorship:
         st.write("")
@@ -593,23 +799,46 @@ with tab_map["Overview"]:
 if CONFIG.ff_show_gaps:
     with tab_map["Gaps"]:
         st.subheader("Gap Analysis")
-        g1, g2 = st.columns([1, 1])
 
-        with g1:
-            render_card("Must-have present", render_chips(analysis["gaps"]["must_present"]))
-            st.write("")
-            render_card("Must-have missing (high confidence)", render_chips(analysis["gaps"]["must_missing_high"]))
-            st.write("")
-            render_card("Must-have missing (maybe)", render_chips(analysis["gaps"]["must_missing_maybe"]))
+        gaps = analysis["gaps"]
 
-        with g2:
-            render_card("Nice-to-have present", render_chips(analysis["gaps"]["nice_present"]))
-            st.write("")
-            render_card("Nice-to-have missing (high confidence)", render_chips(analysis["gaps"]["nice_missing_high"]))
-            st.write("")
-            render_card("Nice-to-have missing (maybe)", render_chips(analysis["gaps"]["nice_missing_maybe"]))
+        # Summary counts
+        must_missing_high = gaps["must_missing_high"]
+        must_missing_maybe = gaps["must_missing_maybe"]
+        nice_missing_high = gaps["nice_missing_high"]
+        nice_missing_maybe = gaps["nice_missing_maybe"]
 
-        note = analysis["gaps"].get("note", "")
+        must_present = gaps["must_present"]
+        nice_present = gaps["nice_present"]
+
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Must missing (high)", len(must_missing_high))
+        s2.metric("Nice missing (high)", len(nice_missing_high))
+        s3.metric("Must present", len(must_present))
+        s4.metric("Nice present", len(nice_present))
+
+        st.write("")
+
+        # Action-first view: only HIGH confidence missing
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            render_card("Must-have missing (high confidence)", render_chips(must_missing_high))
+        with col2:
+            render_card("Nice-to-have missing (high confidence)", render_chips(nice_missing_high))
+
+        # Optional details hidden (clean UI)
+        with st.expander("Show additional details (maybe-missing + present)", expanded=False):
+            d1, d2 = st.columns([1, 1])
+            with d1:
+                render_card("Must-have missing (maybe)", render_chips(must_missing_maybe))
+                st.write("")
+                render_card("Must-have present", render_chips(must_present))
+            with d2:
+                render_card("Nice-to-have missing (maybe)", render_chips(nice_missing_maybe))
+                st.write("")
+                render_card("Nice-to-have present", render_chips(nice_present))
+
+        note = gaps.get("note", "")
         if note:
             st.caption(note)
 

@@ -1,5 +1,5 @@
 import re
-from typing import List, Set, Dict
+from typing import List, Dict
 from core.jd_parser import SKILL_WHITELIST, _norm
 
 ALIASES: Dict[str, List[str]] = {
@@ -10,33 +10,47 @@ ALIASES: Dict[str, List[str]] = {
     "opentofu": ["open tofu"],
     "privatelink": ["private link"],
     "vpc peering": ["peering"],
-    "vpn": ["site to site vpn", "client vpn"],
+    "vpn": ["site to site vpn", "site-to-site vpn", "client vpn"],
+    "github actions": ["github-actions", "actions (github)"],
+    "azure devops": ["ado", "azure devops pipelines"],
+    "argocd": ["argo cd", "argo-cd"],
+    "fluxcd": ["flux cd", "flux-cd"],
+    "gitops": ["git ops", "git-ops"],
+    "circleci": ["circle ci", "circle-ci"],
 }
 
 def extract_resume_skills(resume_text: str) -> List[str]:
-    raw = resume_text.lower()
+    raw = (resume_text or "").lower()
     text = _norm(raw)
 
-    found: Set[str] = set()
+    # expand aliases into canonical mentions
+    expanded = text
+    for canon, variants in ALIASES.items():
+        for v in variants:
+            if v in expanded:
+                expanded += f" {canon}"
 
-    # Direct whitelist match (supports multi-word like "vpc peering")
-    for skill in SKILL_WHITELIST:
-        pattern = r"\b" + re.escape(skill) + r"\b"
-        if re.search(pattern, text):
-            found.add(skill)
+    found = set()
 
-    # Alias match
-    for canonical, alias_list in ALIASES.items():
-        for a in alias_list:
-            ap = r"\b" + re.escape(_norm(a)) + r"\b"
-            if re.search(ap, text):
-                found.add(canonical)
+    # multi-word first
+    multi = sorted([s for s in SKILL_WHITELIST if " " in s], key=len, reverse=True)
+    for s in multi:
+        if s in expanded:
+            found.add(s)
 
-    # Token match for things like EC2, EKS, etc
-    tokens = re.findall(r"[A-Za-z][A-Za-z0-9\+\.\-]{1,}", raw)
-    for t in tokens:
-        tt = _norm(t)
-        if tt in SKILL_WHITELIST:
-            found.add(tt)
+    tokens = set(expanded.split())
+    for s in SKILL_WHITELIST:
+        if " " in s:
+            continue
+        if s in tokens:
+            found.add(s)
 
-    return sorted(found)
+    # normalize a few common overlaps
+    canon_map = {
+        "containers": "docker",
+        "infrastructure as code": "iac",
+        "iac": "iac",
+    }
+    normalized = set(canon_map.get(s, s) for s in found)
+
+    return sorted(normalized)

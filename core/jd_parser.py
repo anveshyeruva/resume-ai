@@ -4,185 +4,190 @@ from typing import List, Dict, Tuple
 
 SECTION_ALIASES = {
     "responsibilities": {"essential responsibilities", "responsibilities", "what you will do", "key responsibilities"},
-    "desired": {"desired experience", "requirements", "minimum qualifications", "must have"},
+    "desired": {"desired experience", "requirements", "minimum qualifications", "must have", "you know you’re the right fit if"},
     "preferred": {"preferred experience", "preferred qualifications", "nice to have", "bonus"},
     "required_skills": {"required skills", "required skills & abilities", "skills & abilities", "skills"},
 }
 
+# Expanded whitelist so we can detect JD-specific tooling (GitOps/Argo/Flux/Bazel/CircleCI/etc.)
 SKILL_WHITELIST = {
-    "aws","azure","gcp","ec2","ecs","eks","rds","lambda","s3","vpc","cloudformation",
-    "terraform","opentofu","pulumi","docker","kubernetes","linux","unix",
-    "ci","cd","cicd","jenkins","github","gitlab","maven","gradle","java","python",
-    "privatelink","vpn","vpc peering","subnet","iam"
+    # Cloud platforms
+    "aws","azure","gcp",
+
+    # AWS services
+    "ec2","ecs","eks","lambda","s3","rds","dynamodb",
+
+    # Infra + security
+    "vpc","subnet","vpn","vpc peering","privatelink","iam","kms","route 53","cloudwatch","cloudtrail",
+
+    # IaC
+    "terraform","opentofu","pulumi","cloudformation","iac","infrastructure as code",
+
+    # Containers
+    "docker","kubernetes","helm","containers",
+
+    # CI/CD + build
+    "cicd","ci","cd","jenkins","github actions","gitlab","azure devops",
+    "circleci","bazel",
+
+    # GitOps
+    "gitops","argocd","fluxcd",
+
+    # Observability / ops
+    "prometheus","grafana","datadog","splunk","apm","metrics","dashboards","alarms","incident response",
+
+    # Languages
+    "python","go","ruby","java",
+
+    # General OS
+    "linux","unix","windows",
 }
+
+_STOPWORDS = {
+    "and","or","the","a","an","to","of","in","for","with","on","as","at","by","from",
+    "you","we","our","your","will","work","team","teams","experience","knowledge",
+    "ability","including","preferred","required","responsibilities","skills","tools",
+    "role","candidate","engineer","engineering","software","development","platform",
+}
+
+def _norm(text: str) -> str:
+    text = text.lower()
+    text = text.replace("ci/cd", "cicd")
+    text = text.replace("ci cd", "cicd")
+    text = text.replace("github-actions", "github actions")
+    text = text.replace("argo cd", "argocd")
+    text = text.replace("flux cd", "fluxcd")
+    text = text.replace("git ops", "gitops")
+    text = re.sub(r"[^a-z0-9\+\#\.\s\-]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 @dataclass
 class JobRequirements:
-    title: str
-    company: str
-    location: str
-    keywords: List[str]
     responsibilities: List[str]
     required_skills: List[str]
     preferred_skills: List[str]
+    keywords: List[str]   # NEW: compatibility with existing code
 
-def _clean_lines(text: str) -> List[str]:
-    lines = [re.sub(r"\s+", " ", l).strip() for l in text.splitlines()]
-    return [l for l in lines if l]
-
-def _norm(s: str) -> str:
-    return re.sub(r"[^a-z0-9\s&/+-]", "", s.lower()).strip()
-
-def extract_keywords(text: str, top_n: int = 40) -> List[str]:
-    tokens = re.findall(r"[A-Za-z][A-Za-z0-9\+\.\-]{1,}", text)
-    stop = set("""
-        and or the with for to of in a an on as is are be from by this that will
-        you we our your their they them it its
-    """.split())
-    freq: Dict[str, int] = {}
-    for t in tokens:
-        tl = t.lower()
-        if tl in stop or len(tl) < 3:
+def _extract_section_lines(lines: List[str], start_idx: int) -> Tuple[List[str], int]:
+    out = []
+    i = start_idx
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
             continue
-        freq[tl] = freq.get(tl, 0) + 1
-    return [k for k, _ in sorted(freq.items(), key=lambda x: x[1], reverse=True)[:top_n]]
+        # stop if looks like another header
+        if line.endswith(":") and len(line) < 60:
+            break
+        out.append(line)
+        i += 1
+    return out, i
 
-def _find_sections(lines: List[str]) -> Dict[str, Tuple[int, int]]:
-    """
-    Returns map: section_name -> (start_index_inclusive, end_index_exclusive)
-    """
-    headers = []
-    for i, line in enumerate(lines):
-        n = _norm(line)
-        for sec, aliases in SECTION_ALIASES.items():
-            if n in aliases:
-                headers.append((i, sec))
-                break
+def _parse_sections(text: str) -> Dict[str, List[str]]:
+    lines = [ln.strip() for ln in text.splitlines()]
+    sections: Dict[str, List[str]] = {
+        "responsibilities": [],
+        "desired": [],
+        "preferred": [],
+        "required_skills": [],
+    }
 
-    # sort and build ranges
-    headers.sort(key=lambda x: x[0])
-    ranges: Dict[str, Tuple[int, int]] = {}
-    for idx, (start, sec) in enumerate(headers):
-        end = headers[idx + 1][0] if idx + 1 < len(headers) else len(lines)
-        ranges[sec] = (start + 1, end)  # content begins after header line
-    return ranges
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        low = line.lower().rstrip(":").strip()
 
-def _as_items(block_lines: List[str]) -> List[str]:
-    items = []
-    for l in block_lines:
-        # stop if we hit an empty line (already removed empties) or another obvious header-style line
-        if len(l) <= 2:
+        key = None
+        if low in SECTION_ALIASES["responsibilities"]:
+            key = "responsibilities"
+        elif low in SECTION_ALIASES["desired"]:
+            key = "desired"
+        elif low in SECTION_ALIASES["preferred"]:
+            key = "preferred"
+        elif low in SECTION_ALIASES["required_skills"]:
+            key = "required_skills"
+
+        if key:
+            i += 1
+            block, i = _extract_section_lines(lines, i)
+            sections[key].extend(block)
             continue
-        # remove bullet markers if present
-        l = re.sub(r"^[•\-\*]\s*", "", l).strip()
-        # ignore pure section-like lines
-        if _norm(l) in {a for s in SECTION_ALIASES.values() for a in s}:
-            continue
-        items.append(l)
-    return items
 
-def _extract_skills_from_text(text: str) -> List[str]:
-    """
-    Pulls likely skills from:
-    - parentheses lists: (EC2, ECS, ...)
-    - slash lists: Terraform/OpenTofu/Pulumi
-    - known tokens
-    """
+        i += 1
+
+    return sections
+
+def _extract_skills(text: str) -> List[str]:
+    t = _norm(text)
     found = set()
 
-    # Parentheses groups
-    for grp in re.findall(r"\(([^)]+)\)", text):
-        parts = re.split(r"[,\|/]", grp)
-        for p in parts:
-            t = _norm(p)
-            if not t:
-                continue
-            found.add(t)
+    multi = sorted([s for s in SKILL_WHITELIST if " " in s], key=len, reverse=True)
+    for s in multi:
+        if s in t:
+            found.add(s)
 
-    # Slash or comma separated terms across the whole text
-    rough = re.split(r"[,\n]", text)
-    for chunk in rough:
-        for p in re.split(r"[\/\|]", chunk):
-            t = _norm(p)
-            if not t:
-                continue
-            # keep short known terms
-            if t in SKILL_WHITELIST:
-                found.add(t)
+    tokens = set(t.split())
+    for s in SKILL_WHITELIST:
+        if " " in s:
+            continue
+        if s in tokens:
+            found.add(s)
 
-    # token scan
-    tokens = re.findall(r"[A-Za-z][A-Za-z0-9\+\.\-]{1,}", text.lower())
-    for t in tokens:
-        tt = _norm(t)
-        if tt in SKILL_WHITELIST:
-            found.add(tt)
-
-    # normalize some common variants
-    normalize_map = {
-        "ci cd": "cicd",
-        "ci/cd": "cicd",
-        "ci": "ci",
-        "cd": "cd",
+    canon_map = {
+        "containers": "docker",
+        "infrastructure as code": "iac",
     }
-    normalized = set()
-    for f in found:
-        normalized.add(normalize_map.get(f, f))
-
-    # Return stable ordering
+    normalized = set(canon_map.get(s, s) for s in found)
     return sorted(normalized)
 
-def _guess_title(lines: List[str]) -> str:
-    # Look for a line that looks like a job title
-    for l in lines[:15]:
-        low = l.lower()
-        if any(w in low for w in ["devops", "site reliability", "sre", "platform engineer", "cloud engineer", "infrastructure engineer"]):
-            if len(l) <= 90:
-                return l
-    # Otherwise blank (better than wrong)
-    return ""
+def _keywords_from_text(text: str, limit: int = 30) -> List[str]:
+    """
+    Lightweight keyword extraction for compatibility/UI. Not used for scoring.
+    """
+    t = _norm(text)
+    toks = [x for x in t.split() if x not in _STOPWORDS and len(x) >= 3]
+    freq: Dict[str, int] = {}
+    for x in toks:
+        freq[x] = freq.get(x, 0) + 1
+    # most frequent tokens
+    top = sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [k for k, _ in top[:limit]]
 
-def parse_job_description(jd_text: str) -> JobRequirements:
-    lines = _clean_lines(jd_text)
-    title = _guess_title(lines)
-    company = ""
-    location = ""
+def parse_job_description(text: str) -> JobRequirements:
+    sections = _parse_sections(text)
 
-    sections = _find_sections(lines)
+    responsibilities = []
+    for ln in sections["responsibilities"]:
+        ln = re.sub(r"^\s*[-•*]\s+", "", ln).strip()
+        ln = re.sub(r"^\s*\d+[.)]\s+", "", ln).strip()
+        if ln and len(ln) >= 8:
+            responsibilities.append(ln)
 
-    responsibilities: List[str] = []
-    if "responsibilities" in sections:
-        s, e = sections["responsibilities"]
-        responsibilities = _as_items(lines[s:e])
+    req_text = "\n".join(sections["desired"] + sections["required_skills"])
+    pref_text = "\n".join(sections["preferred"])
 
-    # Required skills: combine "required_skills" section and "desired" section
-    required_text_parts = []
-    if "required_skills" in sections:
-        s, e = sections["required_skills"]
-        required_text_parts.append("\n".join(lines[s:e]))
-    if "desired" in sections:
-        s, e = sections["desired"]
-        required_text_parts.append("\n".join(lines[s:e]))
-    required_text = "\n".join(required_text_parts)
+    required_skills = _extract_skills(req_text)
+    preferred_skills = _extract_skills(pref_text)
 
-    preferred_text = ""
-    if "preferred" in sections:
-        s, e = sections["preferred"]
-        preferred_text = "\n".join(lines[s:e])
+    if not required_skills:
+        required_skills = _extract_skills(text)
 
-    required_skills = _extract_skills_from_text(required_text)
-    preferred_skills = _extract_skills_from_text(preferred_text)
-
-    # keywords from whole JD
-    keywords = extract_keywords(jd_text)
+    # Keywords: prefer skills first, then fill with frequent tokens
+    skills_first = list(dict.fromkeys(required_skills + preferred_skills))  # preserve order
+    extras = _keywords_from_text(text, limit=60)
+    keywords = []
+    for k in skills_first + extras:
+        if k not in keywords:
+            keywords.append(k)
+        if len(keywords) >= 30:
+            break
 
     return JobRequirements(
-        title=title,
-        company=company,
-        location=location,
-        keywords=keywords,
         responsibilities=responsibilities,
         required_skills=required_skills,
         preferred_skills=preferred_skills,
+        keywords=keywords,
     )
 
 def to_dict(req: JobRequirements) -> Dict:
