@@ -1,3 +1,5 @@
+Work in progress - core JD parsing and scoring are functional, DOCX export and AI rewriting modes are in active development.
+
 # Resume AI Builder (Streamlit, Local-first)
 
 A local-first Streamlit app that analyzes a Job Description against a base resume, builds a requirements scorecard + gap analysis, computes a match percentage, and exports a tailored DOCX. Optional AI rewriting supports **Local (Ollama)** and **Cloud (OpenAI)**.
